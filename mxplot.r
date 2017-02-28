@@ -1,52 +1,47 @@
-# 1.calculate Heatmap matrix and plot metaplot
-# 2.calculate Chip-seq occupancy
-# 3.calculate traveling_ratio 
 
-########################### calculate Heatmap matrix and plot metaplot  ##################
+########################### calculate Heatmap matrix and plot metaplot and heatmap ##################
 # query can be cover.rpm (for coverage) or peak.gr (for enrichment)
+# mclapply(rpmls,mxplot,anntype="anncenter",ann.df=annmll_19_loss,left=-5000,right=5000,bin_width=25,mc.cores=6,mc.set.seed = FALSE)
+
 mxplot=function(query,ann,anntype="tss",left=-5000,right=5000,bin_width=25)
-{
-	
+{	
 	library(GenomicRanges)
 	library("GenomicAlignments")
-	source("customIO.r")
-	
 	if (class(ann)=='data.frame') ann.gr=df2gr(ann,type=anntype) else ann.gr=ann
-	
-	#resize window
-	ann.resize.gr=promoters(ann.gr,upstream=abs(left),downstream=right)
-	ann=as.data.frame(ann.resize.gr)
 	
 	#enrichment or coverage plot
 	enrich <- class(query)=="GRanges"
 	#if (class(query)=="GRanges") enrich=TRUE 
-	if (enrich) cvg=coverage(query) else cvg=query
+	if (enrich) cvg=coverage(query) else cvg=query	
 	
-	chr=as(ann$seqnames,"vector")
-	nrows=nrow(ann)
-	ncols=ifelse(enrich | bin_width==1,(right-left)/bin_width+1,(right-left)/bin_width)
-	v = array( 0, c(nrows,ncols) )
+	seql=unlist(lapply(cvg,length))
+	seqlengths(ann.gr)=seql[seqlevels(ann.gr)]
+	
+	#resize window
+	ann.resize.gr=promoters(ann.gr,upstream=abs(left),downstream=right)
+	ann.gr=trim(ann.resize.gr)
 	
 	message("calculating")
-	for( i in 1:nrow(ann) ) 
-	{	
-		vtmp=rep(0,right-left+1)
-		chrcvg=cvg[[chr[i]]] #chrcvg=eval(parse(text=paste("cvg$",ann$seqnames[i],sep="")))
-
-		start=max(ann$start[i],1)
-		end=min(ann$end[i],length(chrcvg))
-		if (start<=length(chrcvg))
-		{ 		 
-		 tmp2=ifelse(ann$start[i]<1,abs(ann$start[i])+2,1)
-		 tmp3=end-start+tmp2
-		 
-		 vtmp[tmp2:tmp3]= as(chrcvg[start:end],"vector")
-		 if (enrich | bin_width==1) v[i,]=bin(vtmp,bin_width) else v[i,]=bin_mean(vtmp,bin_width)
-		  
- 		if( ann$strand[i]== -1| ann$strand[i]=="-" ) v[i,] = rev( v[i,] )
-		}
- 	}
+	cvgls=cvg[ann.gr]
+	strand=as.vector(strand(ann.gr))
+	f=function(i)
+	{
+		vtmp=cvgls[[i]]
+		n=length(right-left+1-length(vtmp))
+		if (start(ann.gr)[i]<1) vtmp=append(vtmp,rep(0,n),after=0)
+		
+		if (end(ann.gr)[i]> seql[as.vector(seqnames(ann.gr[i]))] ) vtmp=append(vtmp,rep(0,n))
+		
+		if (strand[i] == -1 | strand[i] == '-') vtmp=rev(vtmp)
+		
+		if (enrich | bin_width==1) v=bin(as.vector(vtmp),bin_width) else v=bin_mean(as.vector(vtmp),bin_width)
+		v
+	}
+	
+	vls=lapply(1:length(ann.gr),f)
+	v=do.call(rbind,vls)
 	v
+		
 }
 	
 bin=function(v,bin)
@@ -78,17 +73,65 @@ bin_mean=function(v,bin)
 reassign_log2=function(ratio)
 {# reassign log2 ratio matrix for plot
 tmp=ratio
-tmp[which(tmp=="NaN")]=1
-tmp[which(tmp== Inf)]= max(tmp[which(tmp< Inf)])
+tmp[tmp=="NaN"]=1
+tmp[tmp== Inf]= max(tmp[tmp< Inf])
 ratio=tmp
 log2ratio=log2(ratio)
 tmp=log2ratio
-#tmp[which(tmp=="NaN")]=1
-tmp[which(tmp== -Inf)]= min(tmp[which(tmp> -Inf)])
+#tmp[tmp=="NaN"]=1
+tmp[tmp== -Inf]= min(tmp[tmp> -Inf])
 log2ratio=tmp
 log2ratio
 }
 
+plotmx = function(mxls,output,cutoff=c(0,1),color=c("white","blue"),plot_win=c(0,20,70),win_label=c('-200','TSS','+500'),notes='')
+{##### plot matrix in R
+pal <- colorRampPalette(color)
+x=do.call(cbind,mxls)
+x=apply(x,2,rev)
+x=t(x)
+
+#increase size can make it smoother, save as pdf can make it like in java treeview
+pdf(output,width=length(mxls)*2,height=10)
+layout(matrix(c(rep(1,12),2,3), nrow = 7, ncol = 2, byrow = TRUE))
+
+par(mar=c(1,1,10,1))
+image(x, col=pal(250),breaks=c(min(x),seq(cutoff[1],cutoff[2],length=249),max(x)),useRaster=T,xaxt="n",yaxt="n")
+#abline(v=1/length(mxls)*seq(0,length(mxls)))
+abline(v=1/length(mxls)*seq(1,length(mxls)-1))
+
+n=0.5/length(mxls)
+text(seq(n,1-n,by=n*2),par("usr")[2]+0.1,labels=names(mxls),srt=30,pos=1,xpd=T,cex=2)
+
+axis(side=1,at=1/nrow(x)*plot_win,labels=win_label,cex.axis=1.5 )
+
+
+## color bar
+mincol=color[1]
+maxcol=color[length(color)]
+col=pal(200)
+par(mar=c(6,2,3,4))
+if (cutoff[1]==0)
+{
+barplot(rep(1,300),col=c(col,rep(maxcol,100)),space=0,border=F,axes=F,xlab="reads per million (RPM)",cex.lab=2)
+axis(side=1,at=c(0,50,100,150,200,300),labels=c(0,0.25,0.5,0.75,1,round(max(x))),cex.axis=1.5 )
+}
+
+if (cutoff[1]<0)
+{
+barplot(rep(1,400),col=c(rep(mincol,100),col,rep(maxcol,100)),space=0,border=F,axes=F,xlab="log2FC",cex.lab=1.5)
+axis(side=1,at=c(0,100,200,300,400),labels=c(round(min(x)),cutoff[1],0,cutoff[2],round(max(x))),cex.axis=1.5 )
+}
+
+## text
+par(mar=c(4,1,1,1))
+plot.new()
+text(0.5,0.2,labels=notes,cex=3)
+
+dev.off()
+
+}
+ 
 metaplot=function(mxls,row.select,ylim=c(0,1),center="peak",color=NA,win="5 kb")
 {
 #select: select rows for calculate colMeans (used for grouping data)
@@ -152,39 +195,9 @@ mx.ls2=lapply(mx.reshape.ls,colMeans)
 do.call(rbind,mx.ls2)
 }
 
-plotmx = function(mxls,output,cutoff=1,color=c("white","blue"))
-{##### plot matrix in R
-pal <- colorRampPalette(color)
-x=do.call(cbind,mxls)
-x=apply(x,2,rev)
-x=t(x)
 
-#increase size can make it smoother, save as pdf can make it like in java treeview
-pdf(output,width=length(mxls)*2,height=10)
-
-layout(matrix(c(rep(1,12),2,3), nrow = 7, ncol = 2, byrow = TRUE))
-par(mar=c(1,1,10,1))
-image(x, col=pal(250),breaks=c(seq(0,cutoff,length=250),max(x)),useRaster=T,xaxt="n",yaxt="n")
-abline(v=1/6*seq(0,length(mxls)))
-n=0.5/length(mxls)
-text(seq(n,1-n,by=n*2),par("usr")[2]+0.1,labels=names(mxls),srt=30,pos=1,xpd=T,cex=2)
-
-## color bar
-maxcol=color[length(color)]
-col=pal(200)
-par(mar=c(6,6,2,4))
-barplot(rep(1,300),col=c(col,rep(maxcol,100)),space=0,border=F,axes=F,xlab="reads per million (RPM)",cex.lab=2)
-axis(side=1,at=c(0,50,100,150,200,300),labels=c(0,0.25,0.5,0.75,1,round(max(x))),cex.axis=2 )
-
-## text
-par(mar=c(4,1,1,1))
-plot.new()
-text(0.5,0.2,labels=label,cex=3)
-
-dev.off()
-
-}
- 
+########### old ############
+##!!!!!! the following stop updating
 
 ########################### calculate Chip-seq occupancy from bigwig file  ##################
 
@@ -241,17 +254,6 @@ library("GenomicRanges")
 	tmp
 }
 
-if(FALSE)
-{#another way to calculate occupancy
-chr=as(ann$chr,"vector")
-
-fun=function(chr,start,end)
-{
-x=cvg[[chr]][start:end]
-mean(x)
-}
-y=mapply(fun,chr,start,end)
-}
 
 ####################### traveling_ratio ###################################	
 traveling_ratio=function(ann.df,cover.rpm,left= -30,right=300)
